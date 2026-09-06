@@ -10,6 +10,7 @@ import java.util.Locale
 
 internal object RobustBookMetadataFallback {
     private const val USER_AGENT = "PersonalLibrary/0.1"
+    private const val MAX_TITLE_VARIANTS = 8
 
     fun apply(recognized: JSONObject, enriched: JSONObject): JSONObject {
         val result = JSONObject(enriched.toString())
@@ -104,9 +105,7 @@ internal object RobustBookMetadataFallback {
     }
 
     private fun mergeMissing(result: JSONObject, facts: JSONObject) {
-        if (result.optString("title").isBlank()) {
-            facts.optString("canonical_title").trim().takeIf { it.isNotBlank() }?.let { result.put("title", it) }
-        }
+        facts.optString("canonical_title").trim().takeIf { it.isNotBlank() }?.let { result.put("title", it) }
         if (result.optString("openlibrary_work_id").isBlank()) {
             facts.optString("openlibrary_work_id").trim().takeIf { it.isNotBlank() }?.let { result.put("openlibrary_work_id", it) }
         }
@@ -136,11 +135,13 @@ internal object RobustBookMetadataFallback {
     private fun lookupOpenLibrary(title: String, author: String): JSONObject {
         var best: JSONObject? = null
         var bestScore = -1
-        for (variant in titleVariants(title)) {
-            val queries = listOf(
-                "https://openlibrary.org/search.json?title=${enc(variant)}&author=${enc(author)}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count",
-                "https://openlibrary.org/search.json?q=${enc("$variant $author")}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count",
-            )
+        for ((variantIndex, variant) in titleVariants(title).withIndex()) {
+            val queries = buildList {
+                add("https://openlibrary.org/search.json?title=${enc(variant)}&author=${enc(author)}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count")
+                if (variantIndex == 0) {
+                    add("https://openlibrary.org/search.json?q=${enc("$variant $author")}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count")
+                }
+            }
             for (url in queries) {
                 val docs = getJson(url).optJSONArray("docs") ?: JSONArray()
                 for (i in 0 until docs.length()) {
@@ -272,21 +273,29 @@ internal object RobustBookMetadataFallback {
 
     private fun titleVariants(value: String): List<String> {
         val clean = value.trim().replace(Regex("\\s+"), " ")
-        val variants = linkedSetOf<String>()
         if (clean.isBlank()) return emptyList()
-        variants += clean
-        baseTitle(clean).takeIf { it.isNotBlank() }?.let(variants::add)
+
+        val variants = linkedSetOf(clean)
+        val base = baseTitle(clean)
+        if (base.isNotBlank() && base != clean) variants += base
+
         val words = clean.split(' ').filter { it.isNotBlank() }
-        for (i in 0 until words.lastIndex) {
-            val copy = words.toMutableList()
-            copy[i] = copy[i] + copy[i + 1]
-            copy.removeAt(i + 1)
-            variants += copy.joinToString(" ")
+        if (words.size >= 4) {
+            for (count in minOf(7, words.size - 1) downTo 2) {
+                variants += words.take(count).joinToString(" ")
+            }
         }
-        if (words.size >= 6) {
-            for (count in listOf(7, 6, 5, 4, 3)) if (count < words.size) variants += words.take(count).joinToString(" ")
+
+        if (words.size <= 5) {
+            for (i in 0 until words.lastIndex) {
+                val copy = words.toMutableList()
+                copy[i] = copy[i] + copy[i + 1]
+                copy.removeAt(i + 1)
+                variants += copy.joinToString(" ")
+            }
         }
-        return variants.toList().take(12)
+
+        return variants.take(MAX_TITLE_VARIANTS)
     }
 
     private fun flexibleTitleScore(original: String, variant: String, candidate: String): Int {
@@ -313,8 +322,17 @@ internal object RobustBookMetadataFallback {
 
     private fun authorMatches(author: String, names: JSONArray?): Boolean {
         if (author.isBlank() || names == null) return false
-        val wanted = compact(normalize(author))
-        for (i in 0 until names.length()) if (wanted.isNotBlank() && wanted == compact(normalize(names.optString(i)))) return true
+        val wantedNormalized = normalize(author)
+        val wantedCompact = compact(wantedNormalized)
+        val wantedTokens = wantedNormalized.split(' ').filter { it.length > 1 }.toSet()
+        for (i in 0 until names.length()) {
+            val candidateNormalized = normalize(names.optString(i))
+            if (wantedCompact.isNotBlank() && wantedCompact == compact(candidateNormalized)) return true
+            if (wantedTokens.size >= 2) {
+                val candidateTokens = candidateNormalized.split(' ').filter { it.length > 1 }.toSet()
+                if (wantedTokens.all(candidateTokens::contains)) return true
+            }
+        }
         return false
     }
 
