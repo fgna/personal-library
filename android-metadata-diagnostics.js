@@ -53,6 +53,7 @@
     return [
       ['Open Library', d.open_library],
       ['Google Books', d.google_books],
+      ['Crossref', d.crossref],
       ['Wikipedia', d.wikipedia],
       ['Beschreibung', String(result && result.summary || '').trim() ? 'vorhanden' : 'fehlt'],
       ['Hauptthese', d.main_idea]
