@@ -77,6 +77,37 @@
     sheet.querySelector('#android-llm-close').onclick = close;
   }
 
+  function showScanSourceChoice() {
+    document.getElementById('android-scan-source-choice')?.remove();
+    const de = isGerman();
+    const overlay = document.createElement('div');
+    overlay.id = 'android-scan-source-choice';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:390;background:rgba(28,28,30,.36);display:flex;align-items:flex-end;';
+    const sheet = document.createElement('div');
+    sheet.style.cssText = 'width:100%;background:var(--paper);border-top:1px solid var(--ink);padding:20px 18px calc(20px + var(--safe-bot));box-shadow:0 -18px 50px rgba(28,28,30,.16);';
+    sheet.innerHTML = `
+      <div class="display" style="font-size:24px;margin-bottom:14px">${de ? 'Buch einlesen' : 'Read book'}</div>
+      <button id="android-scan-camera" style="width:100%;text-align:left;border-top:1px solid var(--ink);padding:16px 2px;font-family:var(--sans);font-size:15px;color:var(--oxblood)">${de ? 'Foto aufnehmen' : 'Take photo'}</button>
+      <button id="android-scan-existing-photo" style="width:100%;text-align:left;border-top:1px solid var(--rule);padding:16px 2px;font-family:var(--sans);font-size:15px">${de ? 'Vorhandenes Foto auswählen' : 'Choose existing photo'}</button>
+      <button id="android-scan-source-cancel" style="width:100%;text-align:left;border-top:1px solid var(--rule);padding:16px 2px;font-family:var(--sans);font-size:15px">${de ? 'Abbrechen' : 'Cancel'}</button>
+    `;
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+    sheet.querySelector('#android-scan-source-cancel').onclick = close;
+    sheet.querySelector('#android-scan-camera').onclick = () => {
+      close();
+      try { window.AndroidBookSource.captureBook(); }
+      catch (e) { console.error('Camera launch failed', e); }
+    };
+    sheet.querySelector('#android-scan-existing-photo').onclick = () => {
+      close();
+      try { window.AndroidBookSource.chooseBookPhoto(); }
+      catch (e) { console.error('Photo picker launch failed', e); }
+    };
+  }
+
   function showDuplicateSearchProgress() {
     document.getElementById('android-duplicate-search-progress')?.remove();
     const overlay = document.createElement('div');
@@ -95,18 +126,24 @@
     }, 100);
   }
 
+  window.__bookPhotoSelectionCancelled = function () {
+    document.getElementById('android-book-busy')?.remove();
+  };
+
   document.addEventListener('click', event => {
     const scan = event.target && event.target.closest ? event.target.closest('#android-scan-book-button') : null;
     if (scan) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
       let ready = false;
       try { ready = !!window.AndroidBookSource.isLlmServiceReady(); }
       catch (_) { ready = false; }
       if (!ready) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
         showLlmRequirement();
         return;
       }
+      showScanSourceChoice();
+      return;
     }
 
     const target = event.target && event.target.closest ? event.target.closest('#android-find-duplicates') : null;
