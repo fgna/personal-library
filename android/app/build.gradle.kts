@@ -1,6 +1,6 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.android")
 }
 
 val booksUrl = providers.gradleProperty("booksUrl").orElse("").get()
@@ -40,6 +40,7 @@ android {
             include("config.js")
             include("android-books-source.js")
             include("android-settings.js")
+            include("android-network-diagnostics.js")
             include("android-metadata-diagnostics.js")
             include("android-scan-review-editor.js")
             include("android-book-editor.js")
