@@ -5,7 +5,8 @@ import java.util.Locale
 
 internal object ScannedMetadataPostProcessor {
     fun apply(recognized: JSONObject, enriched: JSONObject): JSONObject {
-        val result = RobustBookMetadataFallback.apply(recognized, enriched)
+        val fallback = RobustBookMetadataFallback.apply(recognized, enriched)
+        val result = SparseBookMetadataAugmenter.apply(recognized, fallback)
 
         val visibleLanguage = normalizeLanguage(recognized.optString("language", "").trim())
         result.put("language", visibleLanguage)
