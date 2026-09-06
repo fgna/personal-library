@@ -18,21 +18,41 @@
     return result && Array.isArray(result._metadata_sources) ? result._metadata_sources : [];
   }
 
+  function hasTransportFailure(result) {
+    const diagnostics = (result && result._metadata_diagnostics) || {};
+    const text = Object.values(diagnostics).join(' ').toLowerCase();
+    return text.includes('unable to resolve host') ||
+      text.includes('no address associated with hostname') ||
+      text.includes('unknownhost') ||
+      text.includes('network is unreachable') ||
+      text.includes('failed to connect') ||
+      text.includes('timed out') ||
+      text.includes('timeout');
+  }
+
   function titleJoinVariants(title) {
     const words = String(title || '').trim().split(/\s+/).filter(Boolean);
     if (words.length < 2) return [];
     const variants = [];
-    for (let i = words.length - 2; i >= 0; i -= 1) {
+
+    // Only repair plausible OCR word splits such as "Bullet Proof" -> "BulletProof".
+    // Do not generate a combinatorial set of variants for long subtitles.
+    for (let i = Math.min(words.length - 2, 5); i >= 0; i -= 1) {
+      const left = words[i];
+      const right = words[i + 1];
+      if (!/^[A-Za-z]{2,}$/.test(left) || !/^[A-Za-z]{2,}$/.test(right)) continue;
+      if ((left.length + right.length) > 16) continue;
       const copy = words.slice();
-      copy.splice(i, 2, copy[i] + copy[i + 1]);
+      copy.splice(i, 2, left + right);
       const candidate = copy.join(' ');
       if (candidate && candidate !== title && !variants.includes(candidate)) variants.push(candidate);
+      if (variants.length >= 2) break;
     }
     return variants;
   }
 
   function nextRetry(result) {
-    if (!result || metadataSources(result).length > 0) {
+    if (!result || metadataSources(result).length > 0 || hasTransportFailure(result)) {
       retryState = null;
       return null;
     }
@@ -81,12 +101,13 @@
     ].join(';');
 
     const noSources = sources.length === 0;
+    const networkFailure = hasTransportFailure(result);
     const title = german()
-      ? (noSources ? 'Keine Online-Metadaten gefunden' : 'Metadaten nur teilweise ergänzt')
-      : (noSources ? 'No online metadata found' : 'Metadata only partially enriched');
+      ? (networkFailure ? 'Metadatenquellen nicht erreichbar' : (noSources ? 'Keine Online-Metadaten gefunden' : 'Metadaten nur teilweise ergänzt'))
+      : (networkFailure ? 'Metadata sources unreachable' : (noSources ? 'No online metadata found' : 'Metadata only partially enriched'));
     const hint = german()
-      ? 'Diagnose des aktuellen Metadatenpfads:'
-      : 'Diagnostic for the current metadata path:';
+      ? (networkFailure ? 'Mindestens eine Metadatenquelle meldete einen Netzwerk-/DNS-Fehler:' : 'Diagnose des aktuellen Metadatenpfads:')
+      : (networkFailure ? 'At least one metadata source reported a network/DNS error:' : 'Diagnostic for the current metadata path:');
     const lines = diagnosticLines(result).map(escapeText).join('<br>');
 
     box.innerHTML = `
