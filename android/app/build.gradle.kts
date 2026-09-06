@@ -1,6 +1,6 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.android")
+    id("org.jetbrains.kotlin.android")
 }
 
 val booksUrl = providers.gradleProperty("booksUrl").orElse("").get()
