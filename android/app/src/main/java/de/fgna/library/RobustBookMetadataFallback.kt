@@ -8,13 +8,6 @@ import java.net.URL
 import java.text.Normalizer
 import java.util.Locale
 
-/**
- * Conservative second-pass bibliographic lookup and enrichment.
- *
- * Identity stays anchored in a title+author match. Once identity is confirmed,
- * additional public sources may fill missing description/subjects, but they do
- * not replace the confirmed title/author or a known first-publication year.
- */
 internal object RobustBookMetadataFallback {
     private const val USER_AGENT = "PersonalLibrary/0.1"
 
@@ -29,7 +22,6 @@ internal object RobustBookMetadataFallback {
         var googleDiagnostic: String? = null
         var archiveDiagnostic: String? = null
 
-        // If the primary enricher did not confirm identity, try normalized Open Library variants.
         if (!identityVerified) {
             val openLibrary = runCatching { lookupOpenLibrary(title, author) }
                 .getOrElse { JSONObject().put("source_error", it.message ?: "Open Library fallback failed") }
@@ -39,14 +31,11 @@ internal object RobustBookMetadataFallback {
                 identityVerified = true
                 openLibraryDiagnostic = "fallback match ${openLibrary.optString("openlibrary_work_id")}".trim()
             } else {
-                openLibraryDiagnostic = if (openLibrary.has("source_error")) {
-                    openLibrary.optString("source_error")
-                } else "no match after normalized fallback"
+                openLibraryDiagnostic = if (openLibrary.has("source_error")) openLibrary.optString("source_error")
+                else "no match after normalized fallback"
             }
         }
 
-        // Google Books is a useful secondary source, but rate limits aggressively.
-        // Make at most one request in this pass and treat HTTP 429 as non-fatal.
         if (needsEnrichment(result) || !identityVerified) {
             val google = runCatching { lookupGoogleBooksOnce(title, author) }
                 .getOrElse { JSONObject().put("source_error", it.message ?: "Google Books fallback failed") }
@@ -63,8 +52,6 @@ internal object RobustBookMetadataFallback {
             }
         }
 
-        // Internet Archive is keyless and often contains richer catalog metadata
-        // (description/subjects) for a title that Open Library identifies only sparsely.
         if (identityVerified && needsEnrichment(result)) {
             val archive = runCatching { lookupInternetArchive(title, author) }
                 .getOrElse { JSONObject().put("source_error", it.message ?: "Internet Archive lookup failed") }
@@ -87,11 +74,8 @@ internal object RobustBookMetadataFallback {
         return if (identityVerified) result else lowerUnverifiedConfidence(result)
     }
 
-    private fun needsEnrichment(result: JSONObject): Boolean {
-        val noDescription = result.optString("summary").trim().isBlank()
-        val noGenres = (result.optJSONArray("genre")?.length() ?: 0) == 0
-        return noDescription || noGenres
-    }
+    private fun needsEnrichment(result: JSONObject): Boolean =
+        result.optString("summary").trim().isBlank() || (result.optJSONArray("genre")?.length() ?: 0) == 0
 
     private fun lowerUnverifiedConfidence(result: JSONObject): JSONObject {
         if (!result.optBoolean("_identity_verified", false)) {
@@ -104,7 +88,6 @@ internal object RobustBookMetadataFallback {
         result.put("_bibliographic_match", true)
         result.put("_identity_verified", true)
         addSource(result, sourceName)
-
         val diagnostics = result.optJSONObject("_metadata_diagnostics") ?: JSONObject().also {
             result.put("_metadata_diagnostics", it)
         }
@@ -116,9 +99,7 @@ internal object RobustBookMetadataFallback {
     }
 
     private fun addSource(result: JSONObject, sourceName: String) {
-        val sources = result.optJSONArray("_metadata_sources") ?: JSONArray().also {
-            result.put("_metadata_sources", it)
-        }
+        val sources = result.optJSONArray("_metadata_sources") ?: JSONArray().also { result.put("_metadata_sources", it) }
         if ((0 until sources.length()).none { sources.optString(it) == sourceName }) sources.put(sourceName)
     }
 
@@ -144,9 +125,7 @@ internal object RobustBookMetadataFallback {
             }
         }
         if (terms.isNotEmpty()) {
-            if ((result.optJSONArray("keywords")?.length() ?: 0) == 0) {
-                result.put("keywords", JSONArray(terms.take(6)))
-            }
+            if ((result.optJSONArray("keywords")?.length() ?: 0) == 0) result.put("keywords", JSONArray(terms.take(6)))
             if ((result.optJSONArray("genre")?.length() ?: 0) == 0) {
                 val genres = mappedGenres(terms)
                 if (genres.isNotEmpty()) result.put("genre", JSONArray(genres.take(3)))
@@ -168,10 +147,7 @@ internal object RobustBookMetadataFallback {
                     val doc = docs.optJSONObject(i) ?: continue
                     if (!authorMatches(author, doc.optJSONArray("author_name"))) continue
                     val score = flexibleTitleScore(title, variant, doc.optString("title"))
-                    if (score > bestScore) {
-                        best = doc
-                        bestScore = score
-                    }
+                    if (score > bestScore) { best = doc; bestScore = score }
                 }
                 if (bestScore >= 100) break
             }
@@ -181,8 +157,7 @@ internal object RobustBookMetadataFallback {
         if (bestScore < 55) return JSONObject()
 
         val facts = JSONObject().put("trusted_match", true)
-        val canonical = match.optString("title").trim()
-        if (canonical.isNotBlank()) facts.put("canonical_title", canonical)
+        match.optString("title").trim().takeIf { it.isNotBlank() }?.let { facts.put("canonical_title", it) }
         val key = match.optString("key")
         val workId = key.removePrefix("/works/").takeIf { key.startsWith("/works/") }.orEmpty()
         if (workId.isNotBlank()) facts.put("openlibrary_work_id", workId)
@@ -191,8 +166,7 @@ internal object RobustBookMetadataFallback {
 
         if (workId.isNotBlank()) {
             runCatching { getJson("https://openlibrary.org/works/$workId.json") }.getOrNull()?.let { work ->
-                val description = descriptionText(work.opt("description"))
-                if (description.isNotBlank()) facts.put("description", description.take(4000))
+                descriptionText(work.opt("description")).takeIf { it.isNotBlank() }?.let { facts.put("description", it.take(4000)) }
                 val subjects = work.optJSONArray("subjects")
                 if (subjects != null && subjects.length() > 0) facts.put("subjects", subjects)
             }
@@ -211,10 +185,7 @@ internal object RobustBookMetadataFallback {
             val info = items.optJSONObject(i)?.optJSONObject("volumeInfo") ?: continue
             if (!authorMatches(author, info.optJSONArray("authors"))) continue
             val score = flexibleTitleScore(title, queryTitle, info.optString("title"))
-            if (score > bestScore) {
-                best = info
-                bestScore = score
-            }
+            if (score > bestScore) { best = info; bestScore = score }
         }
         val info = best ?: return JSONObject()
         if (bestScore < 55) return JSONObject()
@@ -223,16 +194,20 @@ internal object RobustBookMetadataFallback {
             info.optString("title").trim().takeIf { it.isNotBlank() }?.let { put("canonical_title", it) }
             info.optString("description").trim().takeIf { it.isNotBlank() }?.let { put("description", it.take(4000)) }
             info.optJSONArray("categories")?.let { put("categories", it) }
-            val date = info.optString("publishedDate").trim()
-            date.take(4).toIntOrNull()?.takeIf { it > 0 }?.let { put("year_published", it) }
+            info.optString("publishedDate").take(4).toIntOrNull()?.takeIf { it > 0 }?.let { put("year_published", it) }
         }
     }
 
     private fun lookupInternetArchive(title: String, author: String): JSONObject {
-        val q = "title:(\"${escapeIaQuery(baseTitle(title))}\") AND creator:(\"${escapeIaQuery(author)}\") AND mediatype:(texts)"
+        val titleWords = normalize(baseTitle(title)).split(' ').filter { it.length > 1 }.take(6)
+        val authorWords = normalize(author).split(' ').filter { it.length > 1 }
+        if (titleWords.isEmpty() || authorWords.isEmpty()) return JSONObject()
+        val titleQuery = titleWords.joinToString(" AND ") { "title:$it" }
+        val authorQuery = authorWords.joinToString(" AND ") { "creator:$it" }
+        val q = "($titleQuery) AND ($authorQuery) AND mediatype:texts"
         val fields = listOf("identifier", "title", "creator", "date", "description", "subject")
             .joinToString("") { "&fl[]=${enc(it)}" }
-        val url = "https://archive.org/advancedsearch.php?q=${enc(q)}$fields&rows=20&page=1&output=json"
+        val url = "https://archive.org/advancedsearch.php?q=${enc(q)}$fields&rows=30&page=1&output=json"
         val docs = getJson(url).optJSONObject("response")?.optJSONArray("docs") ?: JSONArray()
 
         var best: JSONObject? = null
@@ -241,54 +216,45 @@ internal object RobustBookMetadataFallback {
             val doc = docs.optJSONObject(i) ?: continue
             if (!archiveCreatorMatches(author, doc.opt("creator"))) continue
             val score = flexibleTitleScore(title, baseTitle(title), textValue(doc.opt("title")))
-            if (score > bestScore) {
-                best = doc
-                bestScore = score
-            }
+            if (score > bestScore) { best = doc; bestScore = score }
         }
         val match = best ?: return JSONObject()
         if (bestScore < 55) return JSONObject()
 
         val identifier = match.optString("identifier").trim()
         val metadata = if (identifier.isNotBlank()) {
-            runCatching { getJson("https://archive.org/metadata/${encPath(identifier)}") }
-                .getOrNull()?.optJSONObject("metadata")
+            runCatching { getJson("https://archive.org/metadata/${encPath(identifier)}") }.getOrNull()?.optJSONObject("metadata")
         } else null
 
-        val facts = JSONObject().put("trusted_match", true)
-        if (identifier.isNotBlank()) facts.put("archive_identifier", identifier)
-
-        val description = firstNonBlank(
-            textValue(metadata?.opt("description")),
-            textValue(match.opt("description")),
-        )
-        if (description.isNotBlank()) facts.put("description", description.take(4000))
-
-        val subjects = stringArray(metadata?.opt("subject") ?: match.opt("subject"))
-        if (subjects.length() > 0) facts.put("subjects", subjects)
-
-        val yearText = firstNonBlank(textValue(metadata?.opt("date")), textValue(match.opt("date")))
-        Regex("(?:18|19|20)\\d{2}").find(yearText)?.value?.toIntOrNull()?.let {
-            facts.put("year_published", it)
+        return JSONObject().apply {
+            put("trusted_match", true)
+            if (identifier.isNotBlank()) put("archive_identifier", identifier)
+            val description = firstNonBlank(textValue(metadata?.opt("description")), textValue(match.opt("description")))
+            if (description.isNotBlank()) put("description", description.take(4000))
+            val subjects = stringArray(metadata?.opt("subject") ?: match.opt("subject"))
+            if (subjects.length() > 0) put("subjects", subjects)
+            val yearText = firstNonBlank(textValue(metadata?.opt("date")), textValue(match.opt("date")))
+            Regex("(?:18|19|20)\\d{2}").find(yearText)?.value?.toIntOrNull()?.let { put("year_published", it) }
         }
-        return facts
     }
 
     private fun archiveCreatorMatches(author: String, raw: Any?): Boolean {
-        val wanted = compact(normalize(author))
-        if (wanted.isBlank()) return false
+        val wantedTokens = normalize(author).split(' ').filter { it.length > 1 }.toSet()
+        if (wantedTokens.isEmpty()) return false
+        fun matches(value: String): Boolean {
+            val candidateTokens = normalize(value).split(' ').filter { it.length > 1 }.toSet()
+            return wantedTokens.all(candidateTokens::contains)
+        }
         return when (raw) {
-            is JSONArray -> (0 until raw.length()).any { compact(normalize(raw.optString(it))) == wanted }
-            else -> compact(normalize(textValue(raw))).contains(wanted)
+            is JSONArray -> (0 until raw.length()).any { matches(raw.optString(it)) }
+            else -> matches(textValue(raw))
         }
     }
 
     private fun stringArray(raw: Any?): JSONArray {
         val out = JSONArray()
         when (raw) {
-            is JSONArray -> for (i in 0 until raw.length()) {
-                raw.optString(i).trim().takeIf { it.isNotBlank() }?.let(out::put)
-            }
+            is JSONArray -> for (i in 0 until raw.length()) raw.optString(i).trim().takeIf { it.isNotBlank() }?.let(out::put)
             null, JSONObject.NULL -> Unit
             else -> raw.toString().split(';', ',').map(String::trim).filter(String::isNotBlank).forEach(out::put)
         }
@@ -309,9 +275,7 @@ internal object RobustBookMetadataFallback {
         val variants = linkedSetOf<String>()
         if (clean.isBlank()) return emptyList()
         variants += clean
-        val punctuationBase = baseTitle(clean)
-        if (punctuationBase.isNotBlank()) variants += punctuationBase
-
+        baseTitle(clean).takeIf { it.isNotBlank() }?.let(variants::add)
         val words = clean.split(' ').filter { it.isNotBlank() }
         for (i in 0 until words.lastIndex) {
             val copy = words.toMutableList()
@@ -320,23 +284,18 @@ internal object RobustBookMetadataFallback {
             variants += copy.joinToString(" ")
         }
         if (words.size >= 6) {
-            for (count in listOf(7, 6, 5, 4, 3)) {
-                if (count < words.size) variants += words.take(count).joinToString(" ")
-            }
+            for (count in listOf(7, 6, 5, 4, 3)) if (count < words.size) variants += words.take(count).joinToString(" ")
         }
         return variants.toList().take(12)
     }
 
     private fun flexibleTitleScore(original: String, variant: String, candidate: String): Int {
-        val o = normalize(original)
-        val v = normalize(variant)
-        val c = normalize(candidate)
+        val o = normalize(original); val v = normalize(variant); val c = normalize(candidate)
         if (c.isBlank()) return -1
         if (o == c) return 120
         if (compact(o) == compact(c)) return 115
         if (v == c) return 110
         if (compact(v) == compact(c)) return 105
-
         val oTokens = o.split(' ').filter { it.length > 1 }.toSet()
         val cTokens = c.split(' ').filter { it.length > 1 }.toSet()
         if (oTokens.isEmpty() || cTokens.isEmpty()) return -1
@@ -355,10 +314,7 @@ internal object RobustBookMetadataFallback {
     private fun authorMatches(author: String, names: JSONArray?): Boolean {
         if (author.isBlank() || names == null) return false
         val wanted = compact(normalize(author))
-        for (i in 0 until names.length()) {
-            val candidate = compact(normalize(names.optString(i)))
-            if (wanted.isNotBlank() && wanted == candidate) return true
-        }
+        for (i in 0 until names.length()) if (wanted.isNotBlank() && wanted == compact(normalize(names.optString(i)))) return true
         return false
     }
 
@@ -395,22 +351,12 @@ internal object RobustBookMetadataFallback {
             val status = connection.responseCode
             require(status in 200..299) { "Metadata source HTTP $status" }
             return JSONObject(connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() })
-        } finally {
-            connection.disconnect()
-        }
+        } finally { connection.disconnect() }
     }
 
-    private fun baseTitle(value: String): String = value
-        .substringBefore(':')
-        .substringBefore(" — ")
-        .substringBefore(" - ")
-        .trim()
-
-    private fun escapeIaQuery(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
+    private fun baseTitle(value: String): String = value.substringBefore(':').substringBefore(" — ").substringBefore(" - ").trim()
     private fun enc(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
-    private fun encPath(value: String): String = value.split('/').joinToString("/") {
-        URLEncoder.encode(it, Charsets.UTF_8.name()).replace("+", "%20")
-    }
+    private fun encPath(value: String): String = value.split('/').joinToString("/") { URLEncoder.encode(it, Charsets.UTF_8.name()).replace("+", "%20") }
     private fun compact(value: String): String = value.replace(" ", "")
     private fun normalize(value: String): String = Normalizer.normalize(value, Normalizer.Form.NFD)
         .replace("\\p{M}+".toRegex(), "")
