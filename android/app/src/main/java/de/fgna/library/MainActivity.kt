@@ -80,6 +80,17 @@ class MainActivity : Activity() {
             return
         }
 
+        if (requestCode == REQUEST_PICK_BOOK_IMAGE) {
+            if (resultCode == RESULT_OK) {
+                val uri = data?.data
+                if (uri != null) importBookPhoto(uri)
+                else evaluate("window.__bookScanResult && window.__bookScanResult(null, ${JSONObject.quote("Kein Foto ausgewählt.")});")
+            } else {
+                evaluate("window.__bookPhotoSelectionCancelled && window.__bookPhotoSelectionCancelled();")
+            }
+            return
+        }
+
         if (resultCode != RESULT_OK) return
         when (requestCode) {
             REQUEST_IMPORT -> data?.data?.let(::importBooksJson)
@@ -111,6 +122,25 @@ class MainActivity : Activity() {
                     ?: error("Could not write selected file")
             }.onFailure { error ->
                 showNativeError(error.message ?: "JSON export failed")
+            }
+        }
+    }
+
+    private fun importBookPhoto(uri: Uri) {
+        evaluate("window.__bookScanStatus && window.__bookScanStatus('running', null);")
+        ioExecutor.execute {
+            runCatching {
+                val directory = File(cacheDir, "book-captures").apply { mkdirs() }
+                val output = File(directory, "book-import-${System.currentTimeMillis()}.jpg")
+                contentResolver.openInputStream(uri)?.use { input ->
+                    output.outputStream().use { target -> input.copyTo(target) }
+                } ?: error("Das ausgewählte Foto konnte nicht gelesen werden.")
+                require(output.isFile && output.length() > 0L) { "Das ausgewählte Foto ist leer." }
+                output
+            }.onSuccess { file ->
+                identifyCapturedBook(file)
+            }.onFailure { error ->
+                evaluate("window.__bookScanResult && window.__bookScanResult(null, ${JSONObject.quote(error.message ?: "Foto konnte nicht eingelesen werden")});")
             }
         }
     }
@@ -251,8 +281,7 @@ class MainActivity : Activity() {
                     Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                         addCategory(Intent.CATEGORY_OPENABLE)
                         type = "application/json"
-                    },
-                    REQUEST_IMPORT
+                    }, REQUEST_IMPORT
                 )
             }
         }
@@ -265,8 +294,7 @@ class MainActivity : Activity() {
                         addCategory(Intent.CATEGORY_OPENABLE)
                         type = "application/json"
                         putExtra(Intent.EXTRA_TITLE, "books.json")
-                    },
-                    REQUEST_EXPORT
+                    }, REQUEST_EXPORT
                 )
             }
         }
@@ -282,8 +310,22 @@ class MainActivity : Activity() {
                 startActivityForResult(
                     Intent(this@MainActivity, BookCameraActivity::class.java).apply {
                         putExtra(BookCameraActivity.EXTRA_OUTPUT_PATH, output.absolutePath)
-                    },
-                    REQUEST_CAPTURE,
+                    }, REQUEST_CAPTURE,
+                )
+            }
+        }
+
+        @JavascriptInterface
+        fun chooseBookPhoto() {
+            runOnUiThread {
+                pendingCapture = null
+                pendingRecognition = null
+                pendingMetadata = null
+                startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "image/*"
+                    }, REQUEST_PICK_BOOK_IMAGE,
                 )
             }
         }
@@ -584,6 +626,7 @@ class MainActivity : Activity() {
         private const val REQUEST_IMPORT = 1001
         private const val REQUEST_EXPORT = 1002
         private const val REQUEST_CAPTURE = 1004
+        private const val REQUEST_PICK_BOOK_IMAGE = 1005
         private const val PREF_MANUAL_OVERRIDE = "manual_books_override"
         private const val PREF_LANGUAGE = "ui_language"
     }
