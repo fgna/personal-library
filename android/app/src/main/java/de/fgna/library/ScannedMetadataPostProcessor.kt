@@ -5,17 +5,17 @@ import java.util.Locale
 
 internal object ScannedMetadataPostProcessor {
     fun apply(recognized: JSONObject, enriched: JSONObject): JSONObject {
-        var fallback = RobustBookMetadataFallback.apply(recognized, enriched)
-        if (hasDnsFailure(fallback)) {
-            Thread.sleep(500)
-            fallback = RobustBookMetadataFallback.apply(recognized, fallback)
+        val normalizedRecognized = JSONObject(recognized.toString()).apply {
+            val title = normalizeOcrTitle(optString("title", ""))
+            if (title.isNotBlank()) put("title", title)
         }
-        if (hasDnsFailure(fallback)) {
-            Thread.sleep(1000)
-            fallback = RobustBookMetadataFallback.apply(recognized, fallback)
+        val normalizedEnriched = JSONObject(enriched.toString()).apply {
+            val title = normalizeOcrTitle(optString("title", ""))
+            if (title.isNotBlank()) put("title", title)
         }
 
-        val result = SparseBookMetadataAugmenter.apply(recognized, fallback)
+        val fallback = RobustBookMetadataFallback.apply(normalizedRecognized, normalizedEnriched)
+        val result = SparseBookMetadataAugmenter.apply(normalizedRecognized, fallback)
 
         val visibleLanguage = normalizeLanguage(recognized.optString("language", "").trim())
         result.put("language", visibleLanguage)
@@ -37,19 +37,11 @@ internal object ScannedMetadataPostProcessor {
         return result
     }
 
-    private fun hasDnsFailure(result: JSONObject): Boolean {
-        val diagnostics = result.optJSONObject("_metadata_diagnostics") ?: return false
-        val keys = diagnostics.keys()
-        while (keys.hasNext()) {
-            val value = diagnostics.optString(keys.next(), "")
-            if (value.contains("Unable to resolve host", ignoreCase = true) ||
-                value.contains("No address associated with hostname", ignoreCase = true)
-            ) {
-                return true
-            }
-        }
-        return false
-    }
+    private fun normalizeOcrTitle(value: String): String = value
+        .trim()
+        .replace(Regex("\\s+"), " ")
+        .replace(Regex("(?<=\\d)(?=[A-Za-z])"), " ")
+        .replace(Regex("(?<=[,.:;!?])(?=[A-Za-z])"), " ")
 
     private fun localizeGroundedText(title: String, author: String, sourceText: String): JSONObject? {
         val prompt = """
