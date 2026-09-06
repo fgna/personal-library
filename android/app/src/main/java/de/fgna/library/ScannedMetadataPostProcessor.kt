@@ -5,7 +5,16 @@ import java.util.Locale
 
 internal object ScannedMetadataPostProcessor {
     fun apply(recognized: JSONObject, enriched: JSONObject): JSONObject {
-        val fallback = RobustBookMetadataFallback.apply(recognized, enriched)
+        var fallback = RobustBookMetadataFallback.apply(recognized, enriched)
+        if (hasDnsFailure(fallback)) {
+            Thread.sleep(500)
+            fallback = RobustBookMetadataFallback.apply(recognized, fallback)
+        }
+        if (hasDnsFailure(fallback)) {
+            Thread.sleep(1000)
+            fallback = RobustBookMetadataFallback.apply(recognized, fallback)
+        }
+
         val result = SparseBookMetadataAugmenter.apply(recognized, fallback)
 
         val visibleLanguage = normalizeLanguage(recognized.optString("language", "").trim())
@@ -26,6 +35,20 @@ internal object ScannedMetadataPostProcessor {
         result.put("summary_en", JSONObject.NULL)
         if (mainIdea.isNotBlank()) result.put("main_idea", mainIdea)
         return result
+    }
+
+    private fun hasDnsFailure(result: JSONObject): Boolean {
+        val diagnostics = result.optJSONObject("_metadata_diagnostics") ?: return false
+        val keys = diagnostics.keys()
+        while (keys.hasNext()) {
+            val value = diagnostics.optString(keys.next(), "")
+            if (value.contains("Unable to resolve host", ignoreCase = true) ||
+                value.contains("No address associated with hostname", ignoreCase = true)
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun localizeGroundedText(title: String, author: String, sourceText: String): JSONObject? {
