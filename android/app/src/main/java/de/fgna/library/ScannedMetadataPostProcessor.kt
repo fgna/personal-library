@@ -15,7 +15,8 @@ internal object ScannedMetadataPostProcessor {
         }
 
         val fallback = RobustBookMetadataFallback.apply(normalizedRecognized, normalizedEnriched)
-        val result = SparseBookMetadataAugmenter.apply(normalizedRecognized, fallback)
+        val sparse = SparseBookMetadataAugmenter.apply(normalizedRecognized, fallback)
+        val result = AppleBooksMetadataFallback.apply(normalizedRecognized, sparse)
         val allowedGenres = runCatching { BookGenreTaxonomy.allowedFromActiveCatalog() }.getOrDefault(emptyList())
 
         val visibleLanguage = normalizeLanguage(recognized.optString("language", "").trim())
