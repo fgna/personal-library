@@ -10,6 +10,7 @@ import java.util.Locale
 
 internal object SparseBookMetadataAugmenter {
     private const val USER_AGENT = "PersonalLibrary/0.1"
+    private const val MAX_TITLE_VARIANTS = 8
 
     fun apply(recognized: JSONObject, input: JSONObject): JSONObject {
         val result = JSONObject(input.toString())
@@ -66,11 +67,13 @@ internal object SparseBookMetadataAugmenter {
     private fun richerOpenLibrary(title: String, author: String): JSONObject {
         var best: JSONObject? = null
         var bestScore = Int.MIN_VALUE
-        for (variant in titleVariants(title)) {
-            val urls = listOf(
-                "https://openlibrary.org/search.json?title=${enc(variant)}&author=${enc(author)}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count,first_sentence",
-                "https://openlibrary.org/search.json?q=${enc("$variant $author")}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count,first_sentence",
-            )
+        for ((variantIndex, variant) in titleVariants(title).withIndex()) {
+            val urls = buildList {
+                add("https://openlibrary.org/search.json?title=${enc(variant)}&author=${enc(author)}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count,first_sentence")
+                if (variantIndex == 0) {
+                    add("https://openlibrary.org/search.json?q=${enc("$variant $author")}&limit=50&fields=key,title,author_name,first_publish_year,subject,language,isbn,edition_count,first_sentence")
+                }
+            }
             for (url in urls) {
                 val docs = getJson(url).optJSONArray("docs") ?: JSONArray()
                 for (i in 0 until docs.length()) {
@@ -216,16 +219,23 @@ internal object SparseBookMetadataAugmenter {
     private fun titleVariants(value: String): List<String> {
         val clean = value.trim().replace(Regex("\\s+"), " ")
         if (clean.isBlank()) return emptyList()
+
         val values = linkedSetOf(clean)
         val words = clean.split(' ').filter { it.isNotBlank() }
-        for (i in 0 until words.lastIndex) {
-            val copy = words.toMutableList()
-            copy[i] += copy[i + 1]
-            copy.removeAt(i + 1)
-            values += copy.joinToString(" ")
+        if (words.size >= 4) {
+            for (count in minOf(7, words.size - 1) downTo 2) {
+                values += words.take(count).joinToString(" ")
+            }
         }
-        if (words.size >= 6) for (count in listOf(7, 6, 5, 4, 3)) if (count < words.size) values += words.take(count).joinToString(" ")
-        return values.take(12)
+        if (words.size <= 5) {
+            for (i in 0 until words.lastIndex) {
+                val copy = words.toMutableList()
+                copy[i] += copy[i + 1]
+                copy.removeAt(i + 1)
+                values += copy.joinToString(" ")
+            }
+        }
+        return values.take(MAX_TITLE_VARIANTS)
     }
 
     private fun titleScore(original: String, variant: String, candidate: String): Int {
@@ -252,19 +262,29 @@ internal object SparseBookMetadataAugmenter {
 
     private fun authorsMatch(author: String, names: JSONArray?): Boolean {
         if (names == null) return false
-        val wanted = compact(normalize(author))
-        return (0 until names.length()).any { compact(normalize(names.optString(it))) == wanted }
+        return (0 until names.length()).any { nameMatches(author, names.optString(it)) }
     }
 
     private fun crossrefAuthorMatches(author: String, authors: JSONArray?): Boolean {
         if (authors == null) return false
-        val wanted = compact(normalize(author))
         for (i in 0 until authors.length()) {
             val item = authors.optJSONObject(i) ?: continue
             val candidate = listOf(item.optString("given"), item.optString("family")).filter { it.isNotBlank() }.joinToString(" ")
-            if (compact(normalize(candidate)) == wanted) return true
+            if (nameMatches(author, candidate)) return true
         }
         return false
+    }
+
+    private fun nameMatches(author: String, candidate: String): Boolean {
+        val wantedNormalized = normalize(author)
+        val candidateNormalized = normalize(candidate)
+        val wantedCompact = compact(wantedNormalized)
+        if (wantedCompact.isNotBlank() && wantedCompact == compact(candidateNormalized)) return true
+
+        val wantedTokens = wantedNormalized.split(' ').filter { it.length > 1 }.toSet()
+        if (wantedTokens.size < 2) return false
+        val candidateTokens = candidateNormalized.split(' ').filter { it.length > 1 }.toSet()
+        return wantedTokens.all(candidateTokens::contains)
     }
 
     private fun descriptionText(raw: Any?): String = when (raw) {
