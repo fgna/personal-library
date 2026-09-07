@@ -63,7 +63,7 @@ internal object ScannedMetadataPostProcessor {
             "in diesem buch ",
             "in dem buch ",
         )
-        return if (metaStarters.any(lower::startsWith)) "" else clean
+        return if (metaStarters.any { lower.startsWith(it) }) "" else clean
     }
 
     private fun localizeGroundedText(title: String, author: String, sourceText: String): JSONObject? {
