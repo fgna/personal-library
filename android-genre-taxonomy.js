@@ -9,6 +9,13 @@
   }
 
   function loadVocabulary() {
+    const loadedFacets = window.LIB && window.LIB.facets && Array.isArray(window.LIB.facets.genres)
+      ? window.LIB.facets.genres
+          .map(entry => String(entry && entry.value || '').trim())
+          .filter(Boolean)
+      : [];
+    if (loadedFacets.length) return Promise.resolve(loadedFacets);
+
     if (vocabularyPromise) return vocabularyPromise;
     vocabularyPromise = fetch('books.json', { cache: 'no-store' })
       .then(response => {
@@ -52,11 +59,12 @@
     let vocabulary;
     try {
       vocabulary = await loadVocabulary();
+      if (!vocabulary.length) throw new Error('No genre values in active catalog');
     } catch (error) {
       console.error('Genre vocabulary load failed', error);
       status.textContent = german()
-        ? 'Genre-Auswahl konnte nicht geladen werden. Vorhandene Zuordnung bleibt erhalten.'
-        : 'Genre choices could not be loaded. Existing genres are kept.';
+        ? 'Genre-Auswahl konnte nicht geladen werden. Neue Kategorien sind deaktiviert.'
+        : 'Genre choices could not be loaded. New categories are disabled.';
       input.dataset.genreTaxonomyEnhanced = 'error';
       return;
     }
