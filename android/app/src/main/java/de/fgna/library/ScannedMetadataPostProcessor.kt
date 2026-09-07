@@ -40,7 +40,7 @@ internal object ScannedMetadataPostProcessor {
         if (germanSummary.isNotBlank()) result.put("summary", germanSummary)
         result.put("summary_en", JSONObject.NULL)
         result.put("genre", genres)
-        if (mainIdea.isNotBlank()) result.put("main_idea", mainIdea)
+        result.put("main_idea", if (mainIdea.isNotBlank()) mainIdea else JSONObject.NULL)
         return result
     }
 
