@@ -50,6 +50,20 @@ internal object BookGenreTaxonomy {
         return out
     }
 
+    fun merge(primary: JSONArray?, secondary: JSONArray?, max: Int = 2): JSONArray {
+        val out = JSONArray()
+        val seen = linkedSetOf<String>()
+        for (source in listOf(primary, secondary)) {
+            val sanitized = sanitize(source, max)
+            for (i in 0 until sanitized.length()) {
+                val value = sanitized.optString(i)
+                if (seen.add(value)) out.put(value)
+                if (out.length() >= max) return out
+            }
+        }
+        return out
+    }
+
     fun canonical(value: String): String? {
         val clean = value.trim()
         if (clean.isBlank()) return null
