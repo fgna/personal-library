@@ -29,7 +29,7 @@ internal object BookGenreTaxonomy {
                 if (value.isNotBlank()) values.add(value)
             }
         }
-        return values.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it })
+        return values.sortedWith(String.CASE_INSENSITIVE_ORDER)
     }
 
     fun sanitize(raw: JSONArray?, allowed: List<String> = allowedFromActiveCatalog(), max: Int = MAX_GENRES): JSONArray {
@@ -67,7 +67,7 @@ internal object BookGenreTaxonomy {
 
     fun promptList(allowed: List<String> = allowedFromActiveCatalog()): String {
         val out = JSONArray()
-        allowed.forEach(out::put)
+        allowed.forEach { out.put(it) }
         return out.toString()
     }
 }
