@@ -73,6 +73,7 @@
     return [
       ['Open Library', d.open_library],
       ['Google Books', d.google_books],
+      ['Apple Books', d.apple_books],
       ['Internet Archive', d.internet_archive],
       ['Crossref', d.crossref],
       ['Wikipedia', d.wikipedia],
