@@ -43,6 +43,7 @@ android {
             include("android-network-diagnostics.js")
             include("android-metadata-diagnostics.js")
             include("android-scan-review-editor.js")
+            include("android-genre-taxonomy.js")
             include("android-book-editor.js")
             include("android-duplicates.js")
             include("android-ui-copy.js")

@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit
 class LibraryApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        instance = this
         LocalBookInference.install(this)
 
         Thread {
@@ -26,6 +27,9 @@ class LibraryApplication : Application() {
     }
 
     companion object {
+        lateinit var instance: LibraryApplication
+            private set
+
         private const val WORK_NAME = "daily-books-json-backup"
     }
 }

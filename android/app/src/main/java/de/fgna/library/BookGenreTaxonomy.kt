@@ -1,60 +1,61 @@
 package de.fgna.library
 
 import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.util.Locale
 
 internal object BookGenreTaxonomy {
-    val allowed: List<String> = listOf(
-        "Belletristik",
-        "Krimi & Thriller",
-        "Fantasy & Science-Fiction",
-        "Biografie",
-        "Geschichte",
-        "Politik & Gesellschaft",
-        "Wirtschaft",
-        "Psychologie",
-        "Philosophie",
-        "Wissenschaft",
-        "Gesundheit",
-        "Ratgeber",
-        "Reise",
-        "Kinder & Jugend",
-        "Religion",
-        "Kunst & Kultur",
-    )
+    private const val MAX_GENRES = 3
 
-    private val canonicalByLower = allowed.associateBy { it.lowercase() }
-    private val aliases = mapOf(
-        "sachbuch" to "Ratgeber",
-        "self-help" to "Ratgeber",
-        "self help" to "Ratgeber",
-        "science fiction" to "Fantasy & Science-Fiction",
-        "science-fiction" to "Fantasy & Science-Fiction",
-        "fantasy" to "Fantasy & Science-Fiction",
-        "thriller" to "Krimi & Thriller",
-        "krimi" to "Krimi & Thriller",
-        "politik" to "Politik & Gesellschaft",
-        "gesellschaft" to "Politik & Gesellschaft",
-        "kunst" to "Kunst & Kultur",
-        "kultur" to "Kunst & Kultur",
-    )
+    fun allowedFromActiveCatalog(): List<String> {
+        val app = LibraryApplication.instance
+        val cached = File(app.filesDir, "books-cache.json")
+        val text = if (cached.isFile) {
+            cached.readText(Charsets.UTF_8)
+        } else {
+            app.assets.open("www/books.json").bufferedReader(Charsets.UTF_8).use { it.readText() }
+        }
+        return allowedFromCatalog(text)
+    }
 
-    fun sanitize(raw: JSONArray?, max: Int = 2): JSONArray {
+    fun allowedFromCatalog(catalogJson: String): List<String> {
+        val books = JSONObject(catalogJson).getJSONArray("books")
+        val values = linkedSetOf<String>()
+        for (bookIndex in 0 until books.length()) {
+            val genres = books.optJSONObject(bookIndex)?.optJSONArray("genre") ?: continue
+            for (genreIndex in 0 until genres.length()) {
+                val value = genres.optString(genreIndex).trim()
+                if (value.isNotBlank()) values.add(value)
+            }
+        }
+        return values.sortedBy { it.lowercase(Locale.ROOT) }
+    }
+
+    fun sanitize(raw: JSONArray?, allowed: List<String> = allowedFromActiveCatalog(), max: Int = MAX_GENRES): JSONArray {
         val out = JSONArray()
-        if (raw == null) return out
+        if (raw == null || allowed.isEmpty()) return out
+        val canonicalByLower = allowed.associateBy { it.lowercase(Locale.ROOT) }
         val seen = linkedSetOf<String>()
         for (i in 0 until raw.length()) {
-            val canonical = canonical(raw.optString(i)) ?: continue
+            val clean = raw.optString(i).trim()
+            val canonical = canonicalByLower[clean.lowercase(Locale.ROOT)] ?: continue
             if (seen.add(canonical)) out.put(canonical)
             if (out.length() >= max) break
         }
         return out
     }
 
-    fun merge(primary: JSONArray?, secondary: JSONArray?, max: Int = 2): JSONArray {
+    fun merge(
+        primary: JSONArray?,
+        secondary: JSONArray?,
+        allowed: List<String> = allowedFromActiveCatalog(),
+        max: Int = MAX_GENRES,
+    ): JSONArray {
         val out = JSONArray()
         val seen = linkedSetOf<String>()
         for (source in listOf(primary, secondary)) {
-            val sanitized = sanitize(source, max)
+            val sanitized = sanitize(source, allowed, max)
             for (i in 0 until sanitized.length()) {
                 val value = sanitized.optString(i)
                 if (seen.add(value)) out.put(value)
@@ -64,12 +65,9 @@ internal object BookGenreTaxonomy {
         return out
     }
 
-    fun canonical(value: String): String? {
-        val clean = value.trim()
-        if (clean.isBlank()) return null
-        val key = clean.lowercase()
-        return canonicalByLower[key] ?: aliases[key]
+    fun promptList(allowed: List<String> = allowedFromActiveCatalog()): String {
+        val out = JSONArray()
+        allowed.forEach { out.put(it) }
+        return out.toString()
     }
-
-    fun promptList(): String = allowed.joinToString(", ")
 }

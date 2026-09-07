@@ -16,11 +16,12 @@ internal object ScannedMetadataPostProcessor {
 
         val fallback = RobustBookMetadataFallback.apply(normalizedRecognized, normalizedEnriched)
         val result = SparseBookMetadataAugmenter.apply(normalizedRecognized, fallback)
+        val allowedGenres = runCatching { BookGenreTaxonomy.allowedFromActiveCatalog() }.getOrDefault(emptyList())
 
         val visibleLanguage = normalizeLanguage(recognized.optString("language", "").trim())
         result.put("language", visibleLanguage)
 
-        val sourcedGenres = BookGenreTaxonomy.sanitize(result.optJSONArray("genre"))
+        val sourcedGenres = BookGenreTaxonomy.sanitize(result.optJSONArray("genre"), allowedGenres)
         result.put("genre", sourcedGenres)
 
         val sourcedSummary = result.optString("summary", "").trim()
@@ -30,12 +31,13 @@ internal object ScannedMetadataPostProcessor {
             title = result.optString("title"),
             author = result.optString("author"),
             sourceText = sourcedSummary,
+            allowedGenres = allowedGenres,
         ) ?: return result
 
         val germanSummary = localized.optString("summary", "").trim()
         val mainIdea = normalizeMainIdea(localized.optString("main_idea", ""))
-        val localizedGenres = BookGenreTaxonomy.sanitize(localized.optJSONArray("genres"))
-        val genres = BookGenreTaxonomy.merge(sourcedGenres, localizedGenres)
+        val localizedGenres = BookGenreTaxonomy.sanitize(localized.optJSONArray("genres"), allowedGenres)
+        val genres = BookGenreTaxonomy.merge(sourcedGenres, localizedGenres, allowedGenres)
 
         if (germanSummary.isNotBlank()) result.put("summary", germanSummary)
         result.put("summary_en", JSONObject.NULL)
@@ -66,7 +68,12 @@ internal object ScannedMetadataPostProcessor {
         return if (metaStarters.any { lower.startsWith(it) }) "" else clean
     }
 
-    private fun localizeGroundedText(title: String, author: String, sourceText: String): JSONObject? {
+    private fun localizeGroundedText(
+        title: String,
+        author: String,
+        sourceText: String,
+        allowedGenres: List<String>,
+    ): JSONObject? {
         val prompt = """
             Arbeite ausschließlich mit der folgenden verifizierten Quellenbeschreibung eines Buches.
             Erfinde keine Fakten und ergänze kein Weltwissen.
@@ -75,7 +82,7 @@ internal object ScannedMetadataPostProcessor {
             {
               "summary": "eine knappe, gut lesbare deutsche Kurzbeschreibung in 2-4 Sätzen",
               "main_idea": "die zentrale Hauptthese/Kernidee auf Deutsch in genau einem kurzen Satz",
-              "genres": ["null bis zwei Kategorien aus dem erlaubten Katalog"]
+              "genres": ["null bis drei Genres aus dem bestehenden Katalog"]
             }
 
             Regeln:
@@ -86,9 +93,9 @@ internal object ScannedMetadataPostProcessor {
             - main_idea darf NICHT mit Formulierungen wie "Das Buch", "Dieses Buch", "Der Autor", "Die Autorin", "Der Text" oder "In diesem Buch" beginnen.
             - Falls keine belastbare Kernidee ableitbar ist, setze main_idea auf einen leeren String.
             - summary darf keine zusätzlichen Fakten enthalten.
-            - genres darf höchstens zwei Werte enthalten.
-            - Für genres sind ausschließlich diese exakten Werte erlaubt: ${BookGenreTaxonomy.promptList()}.
-            - Erfinde keine weitere Genre-Bezeichnung. Wenn keine Kategorie belastbar passt, gib ein leeres Array zurück.
+            - genres darf höchstens drei Werte enthalten.
+            - Für genres sind ausschließlich exakte Werte aus diesem bestehenden Katalog erlaubt: ${BookGenreTaxonomy.promptList(allowedGenres)}.
+            - Erfinde keine weitere Genre-Bezeichnung. Wenn kein vorhandenes Genre belastbar passt, gib ein leeres Array zurück.
 
             Titel: $title
             Autor: $author
