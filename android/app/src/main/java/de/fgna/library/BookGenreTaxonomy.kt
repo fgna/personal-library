@@ -29,7 +29,7 @@ internal object BookGenreTaxonomy {
                 if (value.isNotBlank()) values.add(value)
             }
         }
-        return values.sortedWith(String.CASE_INSENSITIVE_ORDER)
+        return values.sortedBy { it.lowercase(Locale.ROOT) }
     }
 
     fun sanitize(raw: JSONArray?, allowed: List<String> = allowedFromActiveCatalog(), max: Int = MAX_GENRES): JSONArray {
