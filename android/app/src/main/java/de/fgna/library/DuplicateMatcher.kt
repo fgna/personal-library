@@ -4,14 +4,40 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.text.Normalizer
 import java.util.Locale
+import kotlin.math.floor
 import kotlin.math.max
 
 object DuplicateMatcher {
     private data class Match(val score: Double, val reason: String)
+    private data class PreparedBook(
+        val index: Int,
+        val book: JSONObject,
+        val title: String,
+        val titleTokens: Set<String>,
+        val author: String,
+        val authorTokens: Set<String>,
+        val authorSurname: String,
+        val workId: String?,
+        val year: Int,
+    )
 
     fun findGroups(books: JSONArray): JSONArray {
         val items = (0 until books.length()).mapNotNull { index ->
-            books.optJSONObject(index)?.let { index to it }
+            books.optJSONObject(index)?.let { book ->
+                val title = normalize(book.optString("title"))
+                val author = normalize(book.optString("author"))
+                PreparedBook(
+                    index = index,
+                    book = book,
+                    title = title,
+                    titleTokens = tokens(title),
+                    author = author,
+                    authorTokens = tokens(author),
+                    authorSurname = author.split(' ').lastOrNull().orEmpty(),
+                    workId = openLibraryWorkId(book),
+                    year = book.optInt("year_published", -1),
+                )
+            }
         }
         val parent = IntArray(items.size) { it }
         val matches = mutableMapOf<Pair<Int, Int>, Match>()
@@ -32,7 +58,7 @@ object DuplicateMatcher {
 
         for (a in items.indices) {
             for (b in a + 1 until items.size) {
-                val match = compare(items[a].second, items[b].second) ?: continue
+                val match = compare(items[a], items[b]) ?: continue
                 matches[a to b] = match
                 union(a, b)
             }
@@ -51,9 +77,10 @@ object DuplicateMatcher {
             }
             val entries = JSONArray()
             cluster.forEach { position ->
-                val (catalogIndex, book) = items[position]
+                val item = items[position]
+                val book = item.book
                 entries.put(JSONObject().apply {
-                    put("index", catalogIndex)
+                    put("index", item.index)
                     put("title", book.optString("title"))
                     put("author", book.optString("author"))
                     put("year_published", nullable(book, "year_published"))
@@ -63,7 +90,7 @@ object DuplicateMatcher {
                     put("book", JSONObject(book.toString()))
                 })
             }
-            val first = items[cluster.first()].second
+            val first = items[cluster.first()].book
             result.put(JSONObject().apply {
                 put("title", first.optString("title"))
                 put("author", first.optString("author"))
@@ -75,33 +102,33 @@ object DuplicateMatcher {
         return result
     }
 
-    private fun compare(a: JSONObject, b: JSONObject): Match? {
-        val idA = openLibraryWorkId(a)
-        val idB = openLibraryWorkId(b)
-        if (idA != null && idB != null && idA == idB) {
+    private fun compare(a: PreparedBook, b: PreparedBook): Match? {
+        if (a.workId != null && b.workId != null && a.workId == b.workId) {
             return Match(1.0, "same Open Library work ID")
         }
 
-        val titleA = normalize(a.optString("title"))
-        val titleB = normalize(b.optString("title"))
-        if (titleA.isBlank() || titleB.isBlank()) return null
-        val title = stringSimilarity(titleA, titleB)
+        if (a.title.isBlank() || b.title.isBlank()) return null
 
-        val authorA = normalize(a.optString("author"))
-        val authorB = normalize(b.optString("author"))
-        val author = authorSimilarity(authorA, authorB)
+        val yearCompatible = a.year <= 0 || b.year <= 0 || kotlin.math.abs(a.year - b.year) <= 2
+        if (!yearCompatible) return null
 
-        val yearA = a.optInt("year_published", -1)
-        val yearB = b.optInt("year_published", -1)
-        val yearCompatible = yearA <= 0 || yearB <= 0 || kotlin.math.abs(yearA - yearB) <= 2
+        val titleThreshold = if (a.author.isBlank() || b.author.isBlank()) 0.92 else 0.78
+        if (!canReachSimilarity(a.title, a.titleTokens, b.title, b.titleTokens, titleThreshold)) return null
+
+        if (a.author.isNotBlank() && b.author.isNotBlank() &&
+            !canReachAuthorSimilarity(a, b, 0.58)
+        ) return null
+
+        val title = stringSimilarity(a.title, a.titleTokens, b.title, b.titleTokens)
+        val author = authorSimilarity(a, b)
 
         val accepted = when {
-            authorA.isBlank() || authorB.isBlank() -> title >= 0.92 && yearCompatible
-            else -> title >= 0.78 && author >= 0.58 && yearCompatible
+            a.author.isBlank() || b.author.isBlank() -> title >= 0.92
+            else -> title >= 0.78 && author >= 0.58
         }
         if (!accepted) return null
 
-        val score = if (authorA.isBlank() || authorB.isBlank()) title * 0.92 else title * 0.72 + author * 0.28
+        val score = if (a.author.isBlank() || b.author.isBlank()) title * 0.92 else title * 0.72 + author * 0.28
         return Match(score, "title ${percent(title)}, author ${percent(author)}")
     }
 
@@ -114,31 +141,83 @@ object DuplicateMatcher {
         return id.takeIf { OPEN_LIBRARY_WORK_ID.matches(it) }
     }
 
-    private fun authorSimilarity(a: String, b: String): Double {
-        if (a.isBlank() || b.isBlank()) return 0.0
-        if (a == b) return 1.0
-        val ta = a.split(' ').filter { it.isNotBlank() }.toSet()
-        val tb = b.split(' ').filter { it.isNotBlank() }.toSet()
-        val surnameA = ta.lastOrNull().orEmpty()
-        val surnameB = tb.lastOrNull().orEmpty()
-        val surnameBoost = if (surnameA.length >= 3 && surnameA == surnameB) 0.88 else 0.0
-        return max(stringSimilarity(a, b), surnameBoost)
+    private fun canReachAuthorSimilarity(a: PreparedBook, b: PreparedBook, threshold: Double): Boolean {
+        if (a.author == b.author) return true
+        if (a.authorSurname.length >= 3 && a.authorSurname == b.authorSurname) return true
+        return canReachSimilarity(a.author, a.authorTokens, b.author, b.authorTokens, threshold)
     }
 
-    private fun stringSimilarity(a: String, b: String): Double {
+    private fun authorSimilarity(a: PreparedBook, b: PreparedBook): Double {
+        if (a.author.isBlank() || b.author.isBlank()) return 0.0
+        if (a.author == b.author) return 1.0
+        val surnameBoost = if (a.authorSurname.length >= 3 && a.authorSurname == b.authorSurname) 0.88 else 0.0
+        return max(stringSimilarity(a.author, a.authorTokens, b.author, b.authorTokens), surnameBoost)
+    }
+
+    private fun canReachSimilarity(
+        a: String,
+        aTokens: Set<String>,
+        b: String,
+        bTokens: Set<String>,
+        threshold: Double,
+    ): Boolean {
+        if (a == b) return true
+
+        if (tokenJaccard(aTokens, bTokens) >= threshold) return true
+        if (threshold <= 0.9 && (a.contains(b) || b.contains(a)) && minOf(a.length, b.length) >= 8) return true
+
+        val maxLength = max(a.length, b.length).coerceAtLeast(1)
+        val maxDistance = floor((1.0 - threshold) * maxLength).toInt()
+        if (kotlin.math.abs(a.length - b.length) > maxDistance) return false
+        return levenshteinAtMost(a, b, maxDistance) <= maxDistance
+    }
+
+    private fun stringSimilarity(a: String, aTokens: Set<String>, b: String, bTokens: Set<String>): Double {
         if (a == b) return 1.0
-        val token = tokenJaccard(a, b)
+        val token = tokenJaccard(aTokens, bTokens)
         val distance = levenshtein(a, b)
         val chars = 1.0 - distance.toDouble() / max(a.length, b.length).coerceAtLeast(1)
         val containment = if ((a.contains(b) || b.contains(a)) && minOf(a.length, b.length) >= 8) 0.9 else 0.0
         return max(max(token, chars), containment).coerceIn(0.0, 1.0)
     }
 
-    private fun tokenJaccard(a: String, b: String): Double {
-        val aa = a.split(' ').filter { it.isNotBlank() }.toSet()
-        val bb = b.split(' ').filter { it.isNotBlank() }.toSet()
-        if (aa.isEmpty() || bb.isEmpty()) return 0.0
-        return aa.intersect(bb).size.toDouble() / aa.union(bb).size
+    private fun tokens(value: String): Set<String> = value.split(' ').filter { it.isNotBlank() }.toSet()
+
+    private fun tokenJaccard(a: Set<String>, b: Set<String>): Double {
+        if (a.isEmpty() || b.isEmpty()) return 0.0
+        val small = if (a.size <= b.size) a else b
+        val large = if (a.size <= b.size) b else a
+        var intersection = 0
+        small.forEach { if (it in large) intersection++ }
+        val union = a.size + b.size - intersection
+        return intersection.toDouble() / union
+    }
+
+    private fun levenshteinAtMost(a: String, b: String, maxDistance: Int): Int {
+        if (maxDistance < 0) return maxDistance + 1
+        if (a.isEmpty()) return b.length
+        if (b.isEmpty()) return a.length
+        if (kotlin.math.abs(a.length - b.length) > maxDistance) return maxDistance + 1
+
+        var previous = IntArray(b.length + 1) { it }
+        var current = IntArray(b.length + 1)
+        for (i in a.indices) {
+            current[0] = i + 1
+            var rowMin = current[0]
+            for (j in b.indices) {
+                current[j + 1] = minOf(
+                    current[j] + 1,
+                    previous[j + 1] + 1,
+                    previous[j] + if (a[i] == b[j]) 0 else 1,
+                )
+                if (current[j + 1] < rowMin) rowMin = current[j + 1]
+            }
+            if (rowMin > maxDistance) return maxDistance + 1
+            val swap = previous
+            previous = current
+            current = swap
+        }
+        return previous[b.length]
     }
 
     private fun levenshtein(a: String, b: String): Int {
