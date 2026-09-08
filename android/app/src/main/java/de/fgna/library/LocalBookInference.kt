@@ -20,6 +20,8 @@ internal object LocalBookInference {
     private const val TIMEOUT_SECONDS = 180L
     @Volatile private var appContext: Context? = null
 
+    private enum class RequestKind { TEXT, IMAGE }
+
     fun install(context: Context) {
         appContext = context.applicationContext
     }
@@ -45,11 +47,13 @@ internal object LocalBookInference {
     }
 
     fun enrich(prompt: String): String =
-        withService { service -> awaitResult { callback -> service.generate(prompt, callback) } }
+        withService { service ->
+            awaitResult(RequestKind.TEXT) { callback -> service.generate(prompt, callback) }
+        }
 
     private fun generateWithImage(service: ILlmService, image: File, prompt: String): String =
         ParcelFileDescriptor.open(image, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            awaitResult { callback -> service.generateWithImage(prompt, descriptor, callback) }
+            awaitResult(RequestKind.IMAGE) { callback -> service.generateWithImage(prompt, descriptor, callback) }
         }
 
     private fun needsAuthorRecovery(raw: String): Boolean {
@@ -129,19 +133,27 @@ internal object LocalBookInference {
         val intent = Intent("de.fgna.androidllmservice.BIND").apply {
             component = ComponentName("de.fgna.androidllmservice", "de.fgna.androidllmservice.LlmBinderService")
         }
-        check(context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) { "Android LLM Service ist nicht verfügbar." }
+        check(context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
+            "Android LLM Service ist nicht installiert oder nicht verfügbar."
+        }
         try {
-            check(latch.await(15, TimeUnit.SECONDS)) { "Zeitüberschreitung beim Verbinden mit Android LLM Service." }
+            check(latch.await(15, TimeUnit.SECONDS)) {
+                "Zeitüberschreitung beim Verbinden mit Android LLM Service."
+            }
             errorRef.get()?.let { throw it }
-            val service = checkNotNull(serviceRef.get()) { "Android LLM Service konnte nicht verbunden werden." }
-            check(service.isModelReady) { "Im Android LLM Service ist kein Modell bereit." }
+            val service = checkNotNull(serviceRef.get()) {
+                "Android LLM Service konnte nicht verbunden werden."
+            }
+            check(service.isModelReady) {
+                "Im Android LLM Service ist kein Modell bereit. Bitte dort zuerst ein Modell auswählen oder importieren."
+            }
             return block(service)
         } finally {
             runCatching { context.unbindService(connection) }
         }
     }
 
-    private fun awaitResult(start: (ILlmCallback) -> Unit): String {
+    private fun awaitResult(kind: RequestKind, start: (ILlmCallback) -> Unit): String {
         val latch = CountDownLatch(1)
         val result = AtomicReference<String?>()
         val error = AtomicReference<Throwable?>()
@@ -150,15 +162,44 @@ internal object LocalBookInference {
                 result.set(text.orEmpty())
                 latch.countDown()
             }
+
             override fun onError(code: String?, message: String?) {
-                error.set(IllegalStateException(listOfNotNull(code, message).joinToString(": ")))
+                error.set(IllegalStateException(serviceErrorMessage(kind, code, message)))
                 latch.countDown()
             }
         })
-        check(latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "LLM-Anfrage hat zu lange gedauert." }
+        check(latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            if (kind == RequestKind.IMAGE) {
+                "Die Bildanalyse im Android LLM Service hat zu lange gedauert."
+            } else {
+                "Die LLM-Anfrage hat zu lange gedauert."
+            }
+        }
         error.get()?.let { throw it }
         return result.get().orEmpty().trim()
     }
+
+    private fun serviceErrorMessage(kind: RequestKind, code: String?, message: String?): String {
+        val cleanCode = code.orEmpty().trim().uppercase(Locale.ROOT)
+        val cleanMessage = message.orEmpty().trim()
+        return when (cleanCode) {
+            "MODEL_NOT_READY" ->
+                "Im Android LLM Service ist kein Modell bereit. Bitte dort zuerst ein Modell auswählen oder importieren."
+            "INVALID_REQUEST" ->
+                "Ungültige Anfrage an Android LLM Service${detail(cleanMessage)}"
+            "INFERENCE_FAILED" -> if (kind == RequestKind.IMAGE) {
+                "Bildinferenz fehlgeschlagen. Das aktive Modell unterstützt möglicherweise keine Bildverarbeitung oder konnte diese Bildanfrage nicht ausführen${detail(cleanMessage)}"
+            } else {
+                "LLM-Inferenz fehlgeschlagen${detail(cleanMessage)}"
+            }
+            else -> {
+                val prefix = if (cleanCode.isBlank()) "Android LLM Service Fehler" else "Android LLM Service Fehler $cleanCode"
+                "$prefix${detail(cleanMessage)}"
+            }
+        }
+    }
+
+    private fun detail(message: String): String = if (message.isBlank()) "." else ": $message"
 
     private fun identifyPrompt(): String = """
         Du liest ein Foto eines einzelnen physischen Buches oder Buchrückens.
