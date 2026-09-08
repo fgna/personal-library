@@ -13,30 +13,14 @@
     }).join(' ');
   }
 
-  function rewritePayload(base64) {
-    if (!base64) return base64;
-    try {
-      const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-      const payload = JSON.parse(new TextDecoder('utf-8').decode(bytes));
-      if (payload && typeof payload === 'object') {
-        payload.author = normalizeAllCapsAuthor(payload.author);
-      }
-      const json = JSON.stringify(payload);
-      const encoded = new TextEncoder().encode(json);
-      let binary = '';
-      encoded.forEach(byte => { binary += String.fromCharCode(byte); });
-      return btoa(binary);
-    } catch (error) {
-      console.warn('Could not normalize scan author case', error);
-      return base64;
-    }
+  function normalizeReviewAuthor() {
+    const input = document.getElementById('scan-edit-author');
+    if (!input) return;
+    const normalized = normalizeAllCapsAuthor(input.value);
+    if (normalized && normalized !== input.value) input.value = normalized;
   }
 
-  ['__bookScanResult', '__bookMetadataResult'].forEach(name => {
-    const original = window[name];
-    if (typeof original !== 'function') return;
-    window[name] = function (base64, error) {
-      return original.call(this, rewritePayload(base64), error);
-    };
-  });
+  const observer = new MutationObserver(normalizeReviewAuthor);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  normalizeReviewAuthor();
 })();
