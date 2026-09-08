@@ -4,6 +4,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import de.fgna.androidllmservice.ILlmCallback
@@ -11,6 +13,7 @@ import de.fgna.androidllmservice.ILlmService
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -19,6 +22,8 @@ import java.util.concurrent.atomic.AtomicReference
 internal object LocalBookInference {
     private const val TIMEOUT_SECONDS = 180L
     @Volatile private var appContext: Context? = null
+
+    private enum class RequestKind { TEXT, IMAGE }
 
     fun install(context: Context) {
         appContext = context.applicationContext
@@ -36,21 +41,78 @@ internal object LocalBookInference {
             if (!needsAuthorRecovery(initial)) {
                 initial
             } else {
-                val recovery = runCatching {
-                    generateWithImage(service, image, authorRecoveryPrompt())
-                }.getOrNull()
-                if (recovery.isNullOrBlank()) initial else mergeAuthorRecovery(initial, recovery)
+                val recoveries = focusedAuthorRecoveries(service, image)
+                if (recoveries.isEmpty()) initial else mergeAuthorRecoveries(initial, recoveries)
             }
         }
     }
 
     fun enrich(prompt: String): String =
-        withService { service -> awaitResult { callback -> service.generate(prompt, callback) } }
+        withService { service ->
+            awaitResult(RequestKind.TEXT) { callback -> service.generate(prompt, callback) }
+        }
 
     private fun generateWithImage(service: ILlmService, image: File, prompt: String): String =
         ParcelFileDescriptor.open(image, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-            awaitResult { callback -> service.generateWithImage(prompt, descriptor, callback) }
+            awaitResult(RequestKind.IMAGE) { callback -> service.generateWithImage(prompt, descriptor, callback) }
         }
+
+    private fun focusedAuthorRecoveries(service: ILlmService, image: File): List<String> {
+        val crops = createAuthorCrops(image)
+        if (crops.isEmpty()) {
+            return listOfNotNull(
+                runCatching { generateWithImage(service, image, authorRecoveryPrompt("gesamtes Cover")) }.getOrNull()
+            ).filter { it.isNotBlank() }
+        }
+
+        return try {
+            buildList {
+                val top = crops.firstOrNull { it.first == "oberer Coverbereich" }
+                if (top != null) {
+                    runCatching { generateWithImage(service, top.second, authorRecoveryPrompt(top.first)) }
+                        .getOrNull()?.takeIf { it.isNotBlank() }?.let(::add)
+                }
+                val bottom = crops.firstOrNull { it.first == "unterer Coverbereich" }
+                if (bottom != null) {
+                    runCatching { generateWithImage(service, bottom.second, authorRecoveryPrompt(bottom.first)) }
+                        .getOrNull()?.takeIf { it.isNotBlank() }?.let(::add)
+                }
+            }
+        } finally {
+            crops.forEach { (_, file) -> file.delete() }
+        }
+    }
+
+    private fun createAuthorCrops(image: File): List<Pair<String, File>> {
+        val context = appContext ?: return emptyList()
+        val bitmap = BitmapFactory.decodeFile(image.absolutePath) ?: return emptyList()
+        return try {
+            if (bitmap.width < 64 || bitmap.height < 64) return emptyList()
+            val cropHeight = (bitmap.height * 0.45f).toInt().coerceIn(1, bitmap.height)
+            val top = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, cropHeight)
+            val bottomY = (bitmap.height - cropHeight).coerceAtLeast(0)
+            val bottom = Bitmap.createBitmap(bitmap, 0, bottomY, bitmap.width, cropHeight)
+            listOfNotNull(
+                writeCrop(context.cacheDir, "author-top", top)?.let { "oberer Coverbereich" to it },
+                writeCrop(context.cacheDir, "author-bottom", bottom)?.let { "unterer Coverbereich" to it },
+            ).also {
+                if (top !== bitmap) top.recycle()
+                if (bottom !== bitmap) bottom.recycle()
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun writeCrop(cacheDir: File, prefix: String, bitmap: Bitmap): File? = runCatching {
+        val directory = File(cacheDir, "book-author-crops").apply { mkdirs() }
+        val file = File(directory, "$prefix-${System.nanoTime()}.jpg")
+        FileOutputStream(file).use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, output)) { "Autor-Crop konnte nicht gespeichert werden." }
+        }
+        require(file.length() > 0L) { "Autor-Crop ist leer." }
+        file
+    }.getOrNull()
 
     private fun needsAuthorRecovery(raw: String): Boolean {
         val parsed = parseObject(raw) ?: return false
@@ -63,19 +125,31 @@ internal object LocalBookInference {
             looksLikeReviewAttribution(author)
     }
 
-    private fun mergeAuthorRecovery(initialRaw: String, recoveryRaw: String): String {
+    private fun mergeAuthorRecoveries(initialRaw: String, recoveryRaws: List<String>): String {
         val initial = parseObject(initialRaw) ?: return initialRaw
-        val recovery = parseObject(recoveryRaw) ?: return initialRaw
-        val recoveredAuthor = recovery.optString("author", "").trim()
+        val recoveries = recoveryRaws.mapNotNull(::parseObject)
+        if (recoveries.isEmpty()) return initialRaw
 
         val names = linkedSetOf<String>()
-        if (recoveredAuthor.isNotBlank()) names += recoveredAuthor
-        stringValues(recovery.optJSONArray("author_candidates")).forEach(names::add)
+        recoveries.forEach { recovery ->
+            val recoveredAuthor = recovery.optString("author", "").trim()
+            if (recoveredAuthor.isNotBlank()) names += recoveredAuthor
+            stringValues(recovery.optJSONArray("author_candidates")).forEach(names::add)
+        }
         stringValues(initial.optJSONArray("author_candidates")).forEach(names::add)
         initial.optString("author", "").trim().takeIf { it.isNotBlank() }?.let(names::add)
-
         initial.put("author_candidates", JSONArray(names.toList()))
-        if (recoveredAuthor.isNotBlank()) initial.put("author", recoveredAuthor)
+
+        val focusedAuthor = recoveries
+            .asSequence()
+            .map { it.optString("author", "").trim() }
+            .firstOrNull { it.isNotBlank() && !looksLikeReviewAttribution(it) }
+        if (!focusedAuthor.isNullOrBlank()) {
+            initial.put("author", focusedAuthor)
+            initial.put("confidence", recoveries.firstOrNull {
+                it.optString("author", "").trim() == focusedAuthor
+            }?.optDouble("confidence", initial.optDouble("confidence", 0.0)) ?: initial.optDouble("confidence", 0.0))
+        }
         return initial.toString()
     }
 
@@ -129,19 +203,27 @@ internal object LocalBookInference {
         val intent = Intent("de.fgna.androidllmservice.BIND").apply {
             component = ComponentName("de.fgna.androidllmservice", "de.fgna.androidllmservice.LlmBinderService")
         }
-        check(context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) { "Android LLM Service ist nicht verfügbar." }
+        check(context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
+            "Android LLM Service ist nicht installiert oder nicht verfügbar."
+        }
         try {
-            check(latch.await(15, TimeUnit.SECONDS)) { "Zeitüberschreitung beim Verbinden mit Android LLM Service." }
+            check(latch.await(15, TimeUnit.SECONDS)) {
+                "Zeitüberschreitung beim Verbinden mit Android LLM Service."
+            }
             errorRef.get()?.let { throw it }
-            val service = checkNotNull(serviceRef.get()) { "Android LLM Service konnte nicht verbunden werden." }
-            check(service.isModelReady) { "Im Android LLM Service ist kein Modell bereit." }
+            val service = checkNotNull(serviceRef.get()) {
+                "Android LLM Service konnte nicht verbunden werden."
+            }
+            check(service.isModelReady) {
+                "Im Android LLM Service ist kein Modell bereit. Bitte dort zuerst ein Modell auswählen oder importieren."
+            }
             return block(service)
         } finally {
             runCatching { context.unbindService(connection) }
         }
     }
 
-    private fun awaitResult(start: (ILlmCallback) -> Unit): String {
+    private fun awaitResult(kind: RequestKind, start: (ILlmCallback) -> Unit): String {
         val latch = CountDownLatch(1)
         val result = AtomicReference<String?>()
         val error = AtomicReference<Throwable?>()
@@ -150,15 +232,44 @@ internal object LocalBookInference {
                 result.set(text.orEmpty())
                 latch.countDown()
             }
+
             override fun onError(code: String?, message: String?) {
-                error.set(IllegalStateException(listOfNotNull(code, message).joinToString(": ")))
+                error.set(IllegalStateException(serviceErrorMessage(kind, code, message)))
                 latch.countDown()
             }
         })
-        check(latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "LLM-Anfrage hat zu lange gedauert." }
+        check(latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            if (kind == RequestKind.IMAGE) {
+                "Die Bildanalyse im Android LLM Service hat zu lange gedauert."
+            } else {
+                "Die LLM-Anfrage hat zu lange gedauert."
+            }
+        }
         error.get()?.let { throw it }
         return result.get().orEmpty().trim()
     }
+
+    private fun serviceErrorMessage(kind: RequestKind, code: String?, message: String?): String {
+        val cleanCode = code.orEmpty().trim().uppercase(Locale.ROOT)
+        val cleanMessage = message.orEmpty().trim()
+        return when (cleanCode) {
+            "MODEL_NOT_READY" ->
+                "Im Android LLM Service ist kein Modell bereit. Bitte dort zuerst ein Modell auswählen oder importieren."
+            "INVALID_REQUEST" ->
+                "Ungültige Anfrage an Android LLM Service${detail(cleanMessage)}"
+            "INFERENCE_FAILED" -> if (kind == RequestKind.IMAGE) {
+                "Bildinferenz fehlgeschlagen. Das aktive Modell unterstützt möglicherweise keine Bildverarbeitung oder konnte diese Bildanfrage nicht ausführen${detail(cleanMessage)}"
+            } else {
+                "LLM-Inferenz fehlgeschlagen${detail(cleanMessage)}"
+            }
+            else -> {
+                val prefix = if (cleanCode.isBlank()) "Android LLM Service Fehler" else "Android LLM Service Fehler $cleanCode"
+                "$prefix${detail(cleanMessage)}"
+            }
+        }
+    }
+
+    private fun detail(message: String): String = if (message.isBlank()) "." else ": $message"
 
     private fun identifyPrompt(): String = """
         Du liest ein Foto eines einzelnen physischen Buches oder Buchrückens.
@@ -190,26 +301,26 @@ internal object LocalBookInference {
         - Wenn kein Titel sicher lesbar ist, setze title auf einen leeren String.
     """.trimIndent()
 
-    private fun authorRecoveryPrompt(): String = """
-        Dies ist ein zweiter visueller OCR-Kontrolllauf für dasselbe Foto eines physischen Buches.
+    private fun authorRecoveryPrompt(region: String): String = """
+        Dies ist ein fokussierter visueller OCR-Kontrolllauf auf dem $region eines physischen Buchcovers.
+        Der Ausschnitt wurde absichtlich vergrößert, damit kleine Namen lesbar werden.
         Ignoriere vollständig dein Weltwissen darüber, wer ein bestimmtes Buch geschrieben hat.
-        Verwende ausschließlich Buchstaben und typografische Rollen, die du auf dem Foto tatsächlich sehen kannst.
-
-        Ziel: Prüfe besonders sorgfältig die kleine Autorenzeile in unmittelbarer Nähe des Haupttitels. Lies auch alle anderen sichtbaren Personennamen, aber unterscheide Autorenzeilen von Namen in Zitaten, Rezensionen, Presseangaben und Empfehlungen.
+        Verwende ausschließlich Buchstaben und typografische Rollen, die du in DIESEM Ausschnitt tatsächlich sehen kannst.
 
         Antworte ausschließlich mit genau einem JSON-Objekt ohne Markdown:
         {
-          "author": "sichtbarer Name aus der eigentlichen Autorenzeile oder leerer String",
-          "author_candidates": ["alle tatsächlich sichtbaren Personennamen"],
+          "author": "sichtbarer Name aus einer eigentlichen Autorenzeile oder leerer String",
+          "author_candidates": ["alle tatsächlich sichtbaren Personennamen in diesem Ausschnitt"],
           "confidence": 0.0
         }
 
         Regeln:
-        - Untersuche gezielt den Bereich direkt oberhalb, unterhalb und neben dem Haupttitel, auch wenn die Schrift dort kleiner ist als Zitat- oder Werbetext.
+        - Suche systematisch nach einer eigenständigen Autorenzeile, besonders an Außenrändern sowie oberhalb oder unterhalb des Titels.
         - Ein Name in oder neben einem Zitat, in Anführungszeichen oder zusammen mit einer Zeitung/Magazin/Pressequelle ist ein Rezensent oder Empfehlungsgeber und darf nicht als author gewählt werden.
-        - author muss buchstabengetreu auf dem Foto sichtbar sein. Erfinde, korrigiere oder vervollständige keinen Namen aus Wissen über das Buch.
+        - Kurze Lobzeilen oder Rezensionen sind keine Autorenzeilen, auch wenn der Personenname typografisch auffällig ist.
+        - author muss buchstabengetreu in diesem Ausschnitt sichtbar sein. Erfinde, korrigiere oder vervollständige keinen Namen aus Wissen über das Buch.
         - author_candidates ist nur eine Liste sichtbarer Namen; dort dürfen auch Rezensenten stehen.
         - Wenn keine eigentliche Autorenzeile sicher erkennbar ist, setze author auf einen leeren String.
-        - confidence bewertet nur die visuelle Sicherheit der Autorenzuordnung.
+        - confidence bewertet nur die visuelle Sicherheit der Autorenzuordnung in diesem Ausschnitt.
     """.trimIndent()
 }
