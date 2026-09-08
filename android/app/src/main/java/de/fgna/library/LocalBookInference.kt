@@ -4,6 +4,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import de.fgna.androidllmservice.ILlmCallback
@@ -11,6 +13,7 @@ import de.fgna.androidllmservice.ILlmService
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -38,10 +41,8 @@ internal object LocalBookInference {
             if (!needsAuthorRecovery(initial)) {
                 initial
             } else {
-                val recovery = runCatching {
-                    generateWithImage(service, image, authorRecoveryPrompt())
-                }.getOrNull()
-                if (recovery.isNullOrBlank()) initial else mergeAuthorRecovery(initial, recovery)
+                val recoveries = focusedAuthorRecoveries(service, image)
+                if (recoveries.isEmpty()) initial else mergeAuthorRecoveries(initial, recoveries)
             }
         }
     }
@@ -56,6 +57,63 @@ internal object LocalBookInference {
             awaitResult(RequestKind.IMAGE) { callback -> service.generateWithImage(prompt, descriptor, callback) }
         }
 
+    private fun focusedAuthorRecoveries(service: ILlmService, image: File): List<String> {
+        val crops = createAuthorCrops(image)
+        if (crops.isEmpty()) {
+            return listOfNotNull(
+                runCatching { generateWithImage(service, image, authorRecoveryPrompt("gesamtes Cover")) }.getOrNull()
+            ).filter { it.isNotBlank() }
+        }
+
+        return try {
+            buildList {
+                val top = crops.firstOrNull { it.first == "oberer Coverbereich" }
+                if (top != null) {
+                    runCatching { generateWithImage(service, top.second, authorRecoveryPrompt(top.first)) }
+                        .getOrNull()?.takeIf { it.isNotBlank() }?.let(::add)
+                }
+                val bottom = crops.firstOrNull { it.first == "unterer Coverbereich" }
+                if (bottom != null) {
+                    runCatching { generateWithImage(service, bottom.second, authorRecoveryPrompt(bottom.first)) }
+                        .getOrNull()?.takeIf { it.isNotBlank() }?.let(::add)
+                }
+            }
+        } finally {
+            crops.forEach { (_, file) -> file.delete() }
+        }
+    }
+
+    private fun createAuthorCrops(image: File): List<Pair<String, File>> {
+        val context = appContext ?: return emptyList()
+        val bitmap = BitmapFactory.decodeFile(image.absolutePath) ?: return emptyList()
+        return try {
+            if (bitmap.width < 64 || bitmap.height < 64) return emptyList()
+            val cropHeight = (bitmap.height * 0.45f).toInt().coerceIn(1, bitmap.height)
+            val top = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, cropHeight)
+            val bottomY = (bitmap.height - cropHeight).coerceAtLeast(0)
+            val bottom = Bitmap.createBitmap(bitmap, 0, bottomY, bitmap.width, cropHeight)
+            listOfNotNull(
+                writeCrop(context.cacheDir, "author-top", top)?.let { "oberer Coverbereich" to it },
+                writeCrop(context.cacheDir, "author-bottom", bottom)?.let { "unterer Coverbereich" to it },
+            ).also {
+                if (top !== bitmap) top.recycle()
+                if (bottom !== bitmap) bottom.recycle()
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun writeCrop(cacheDir: File, prefix: String, bitmap: Bitmap): File? = runCatching {
+        val directory = File(cacheDir, "book-author-crops").apply { mkdirs() }
+        val file = File(directory, "$prefix-${System.nanoTime()}.jpg")
+        FileOutputStream(file).use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.JPEG, 96, output)) { "Autor-Crop konnte nicht gespeichert werden." }
+        }
+        require(file.length() > 0L) { "Autor-Crop ist leer." }
+        file
+    }.getOrNull()
+
     private fun needsAuthorRecovery(raw: String): Boolean {
         val parsed = parseObject(raw) ?: return false
         val author = parsed.optString("author", "").trim()
@@ -67,19 +125,31 @@ internal object LocalBookInference {
             looksLikeReviewAttribution(author)
     }
 
-    private fun mergeAuthorRecovery(initialRaw: String, recoveryRaw: String): String {
+    private fun mergeAuthorRecoveries(initialRaw: String, recoveryRaws: List<String>): String {
         val initial = parseObject(initialRaw) ?: return initialRaw
-        val recovery = parseObject(recoveryRaw) ?: return initialRaw
-        val recoveredAuthor = recovery.optString("author", "").trim()
+        val recoveries = recoveryRaws.mapNotNull(::parseObject)
+        if (recoveries.isEmpty()) return initialRaw
 
         val names = linkedSetOf<String>()
-        if (recoveredAuthor.isNotBlank()) names += recoveredAuthor
-        stringValues(recovery.optJSONArray("author_candidates")).forEach(names::add)
+        recoveries.forEach { recovery ->
+            val recoveredAuthor = recovery.optString("author", "").trim()
+            if (recoveredAuthor.isNotBlank()) names += recoveredAuthor
+            stringValues(recovery.optJSONArray("author_candidates")).forEach(names::add)
+        }
         stringValues(initial.optJSONArray("author_candidates")).forEach(names::add)
         initial.optString("author", "").trim().takeIf { it.isNotBlank() }?.let(names::add)
-
         initial.put("author_candidates", JSONArray(names.toList()))
-        if (recoveredAuthor.isNotBlank()) initial.put("author", recoveredAuthor)
+
+        val focusedAuthor = recoveries
+            .asSequence()
+            .map { it.optString("author", "").trim() }
+            .firstOrNull { it.isNotBlank() && !looksLikeReviewAttribution(it) }
+        if (!focusedAuthor.isNullOrBlank()) {
+            initial.put("author", focusedAuthor)
+            initial.put("confidence", recoveries.firstOrNull {
+                it.optString("author", "").trim() == focusedAuthor
+            }?.optDouble("confidence", initial.optDouble("confidence", 0.0)) ?: initial.optDouble("confidence", 0.0))
+        }
         return initial.toString()
     }
 
@@ -231,26 +301,26 @@ internal object LocalBookInference {
         - Wenn kein Titel sicher lesbar ist, setze title auf einen leeren String.
     """.trimIndent()
 
-    private fun authorRecoveryPrompt(): String = """
-        Dies ist ein zweiter visueller OCR-Kontrolllauf für dasselbe Foto eines physischen Buches.
+    private fun authorRecoveryPrompt(region: String): String = """
+        Dies ist ein fokussierter visueller OCR-Kontrolllauf auf dem $region eines physischen Buchcovers.
+        Der Ausschnitt wurde absichtlich vergrößert, damit kleine Namen lesbar werden.
         Ignoriere vollständig dein Weltwissen darüber, wer ein bestimmtes Buch geschrieben hat.
-        Verwende ausschließlich Buchstaben und typografische Rollen, die du auf dem Foto tatsächlich sehen kannst.
-
-        Ziel: Prüfe besonders sorgfältig die kleine Autorenzeile in unmittelbarer Nähe des Haupttitels. Lies auch alle anderen sichtbaren Personennamen, aber unterscheide Autorenzeilen von Namen in Zitaten, Rezensionen, Presseangaben und Empfehlungen.
+        Verwende ausschließlich Buchstaben und typografische Rollen, die du in DIESEM Ausschnitt tatsächlich sehen kannst.
 
         Antworte ausschließlich mit genau einem JSON-Objekt ohne Markdown:
         {
-          "author": "sichtbarer Name aus der eigentlichen Autorenzeile oder leerer String",
-          "author_candidates": ["alle tatsächlich sichtbaren Personennamen"],
+          "author": "sichtbarer Name aus einer eigentlichen Autorenzeile oder leerer String",
+          "author_candidates": ["alle tatsächlich sichtbaren Personennamen in diesem Ausschnitt"],
           "confidence": 0.0
         }
 
         Regeln:
-        - Untersuche gezielt den Bereich direkt oberhalb, unterhalb und neben dem Haupttitel, auch wenn die Schrift dort kleiner ist als Zitat- oder Werbetext.
+        - Suche systematisch nach einer eigenständigen Autorenzeile, besonders an Außenrändern sowie oberhalb oder unterhalb des Titels.
         - Ein Name in oder neben einem Zitat, in Anführungszeichen oder zusammen mit einer Zeitung/Magazin/Pressequelle ist ein Rezensent oder Empfehlungsgeber und darf nicht als author gewählt werden.
-        - author muss buchstabengetreu auf dem Foto sichtbar sein. Erfinde, korrigiere oder vervollständige keinen Namen aus Wissen über das Buch.
+        - Kurze Lobzeilen oder Rezensionen sind keine Autorenzeilen, auch wenn der Personenname typografisch auffällig ist.
+        - author muss buchstabengetreu in diesem Ausschnitt sichtbar sein. Erfinde, korrigiere oder vervollständige keinen Namen aus Wissen über das Buch.
         - author_candidates ist nur eine Liste sichtbarer Namen; dort dürfen auch Rezensenten stehen.
         - Wenn keine eigentliche Autorenzeile sicher erkennbar ist, setze author auf einen leeren String.
-        - confidence bewertet nur die visuelle Sicherheit der Autorenzuordnung.
+        - confidence bewertet nur die visuelle Sicherheit der Autorenzuordnung in diesem Ausschnitt.
     """.trimIndent()
 }
