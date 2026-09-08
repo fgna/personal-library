@@ -22,6 +22,9 @@ internal object ScannedMetadataPostProcessor {
         val visibleLanguage = normalizeLanguage(recognized.optString("language", "").trim())
         result.put("language", visibleLanguage)
 
+        val normalizedAuthor = normalizeOcrAuthor(result.optString("author", ""))
+        if (normalizedAuthor.isNotBlank()) result.put("author", normalizedAuthor)
+
         val sourcedGenres = BookGenreTaxonomy.sanitize(result.optJSONArray("genre"), allowedGenres)
         result.put("genre", sourcedGenres)
 
@@ -52,6 +55,16 @@ internal object ScannedMetadataPostProcessor {
         .replace(Regex("\\s+"), " ")
         .replace(Regex("(?<=\\d)(?=[A-Za-z])"), " ")
         .replace(Regex("(?<=[,.:;!?])(?=[A-Za-z])"), " ")
+
+    private fun normalizeOcrAuthor(value: String): String {
+        val clean = value.trim().replace(Regex("\\s+"), " ")
+        val letters = clean.filter(Char::isLetter)
+        if (letters.isEmpty() || letters.any(Char::isLowerCase)) return clean
+        return clean.split(' ').joinToString(" ") { word ->
+            if (word.isBlank()) word
+            else word.lowercase(Locale.ROOT).replaceFirstChar { it.titlecase(Locale.ROOT) }
+        }
+    }
 
     private fun normalizeMainIdea(value: String): String {
         val clean = value.trim()
