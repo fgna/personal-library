@@ -46,6 +46,7 @@ android {
             include("android-genre-taxonomy.js")
             include("android-book-editor.js")
             include("android-duplicates.js")
+            include("android-duplicate-field-merge.js")
             include("android-ui-copy.js")
         }
         from(rootProject.projectDir.parentFile) {
