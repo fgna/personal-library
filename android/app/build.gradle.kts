@@ -93,7 +93,12 @@ android {
 
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/webAssets"))
     tasks.named("preBuild").configure { dependsOn(syncWebAssets) }
-    tasks.named("preDebugBuild").configure { dependsOn(generateSigTestKeystore) }
+}
+
+tasks.configureEach {
+    if (name == "validateSigningDebug" || name == "packageDebug") {
+        dependsOn(generateSigTestKeystore)
+    }
 }
 
 dependencies {
