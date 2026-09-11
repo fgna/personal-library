@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -8,7 +10,7 @@ val sigTestKeystore = layout.projectDirectory.file("sigtest-debug.keystore").asF
 val generateSigTestKeystore by tasks.registering(Exec::class) {
     onlyIf { !sigTestKeystore.exists() }
     commandLine(
-        java.io.File(System.getProperty("java.home"), "bin/keytool").absolutePath,
+        File(System.getProperty("java.home"), "bin/keytool").absolutePath,
         "-genkeypair",
         "-keystore", sigTestKeystore.absolutePath,
         "-storepass", "test1234",
