@@ -4,10 +4,35 @@ plugins {
 }
 
 val booksUrl = providers.gradleProperty("booksUrl").orElse("").get()
+val sigTestKeystore = layout.projectDirectory.file("sigtest-debug.keystore").asFile
+val generateSigTestKeystore by tasks.registering(Exec::class) {
+    onlyIf { !sigTestKeystore.exists() }
+    commandLine(
+        java.io.File(System.getProperty("java.home"), "bin/keytool").absolutePath,
+        "-genkeypair",
+        "-keystore", sigTestKeystore.absolutePath,
+        "-storepass", "test1234",
+        "-keypass", "test1234",
+        "-alias", "sigtest",
+        "-keyalg", "RSA",
+        "-keysize", "2048",
+        "-validity", "3650",
+        "-dname", "CN=Personal Library Signature Test",
+    )
+}
 
 android {
     namespace = "de.fgna.library"
     compileSdk = 34
+
+    signingConfigs {
+        create("sigtest") {
+            storeFile = sigTestKeystore
+            storePassword = "test1234"
+            keyAlias = "sigtest"
+            keyPassword = "test1234"
+        }
+    }
 
     defaultConfig {
         applicationId = "de.fgna.library"
@@ -16,6 +41,13 @@ android {
         versionCode = 2
         versionName = "0.2.0"
         buildConfigField("String", "BOOKS_URL", "\"${booksUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
+    }
+
+    buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".sigtest"
+            signingConfig = signingConfigs.getByName("sigtest")
+        }
     }
 
     buildFeatures {
@@ -59,6 +91,7 @@ android {
 
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/webAssets"))
     tasks.named("preBuild").configure { dependsOn(syncWebAssets) }
+    tasks.named("preDebugBuild").configure { dependsOn(generateSigTestKeystore) }
 }
 
 dependencies {
